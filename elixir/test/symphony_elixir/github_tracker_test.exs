@@ -120,7 +120,9 @@ defmodule SymphonyElixir.GithubTrackerTest do
     assert issue.assignee_id == "kentoku"
   end
 
-  test "github client preserves non-active open workflow states from status labels" do
+  test "github client batches open issue state refreshes and falls back for missing ids" do
+    test_pid = self()
+
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "github",
       tracker_api_token: "github-token",
@@ -129,29 +131,61 @@ defmodule SymphonyElixir.GithubTrackerTest do
     )
 
     Application.put_env(:symphony_elixir, :github_request_fun, fn opts ->
-      assert opts[:method] == :get
-      assert opts[:url] == "https://api.github.com/repos/kmatsunami/symphony/issues/104"
+      send(test_pid, {:github_request, opts[:method], opts[:url], opts[:params]})
 
-      {:ok,
-       %Req.Response{
-         status: 200,
-         body: %{
-           "number" => 104,
-           "title" => "Waiting for review",
-           "body" => nil,
-           "state" => "open",
-           "labels" => [%{"name" => "status: Human Review"}],
-           "assignees" => [],
-           "html_url" => "https://github.com/kmatsunami/symphony/issues/104",
-           "created_at" => "2026-01-01T00:00:00Z",
-           "updated_at" => "2026-01-01T00:01:00Z"
-         },
-         headers: []
-       }}
+      case {opts[:method], opts[:url]} do
+        {:get, "https://api.github.com/repos/kmatsunami/symphony/issues"} ->
+          assert opts[:params]["state"] == "open"
+
+          {:ok,
+           %Req.Response{
+             status: 200,
+             body: [
+               %{
+                 "number" => 104,
+                 "title" => "Waiting for review",
+                 "body" => nil,
+                 "state" => "open",
+                 "labels" => [%{"name" => "status: Human Review"}],
+                 "assignees" => [],
+                 "html_url" => "https://github.com/kmatsunami/symphony/issues/104",
+                 "created_at" => "2026-01-01T00:00:00Z",
+                 "updated_at" => "2026-01-01T00:01:00Z"
+               }
+             ],
+             headers: []
+           }}
+
+        {:get, "https://api.github.com/repos/kmatsunami/symphony/issues/105"} ->
+          {:ok,
+           %Req.Response{
+             status: 200,
+             body: %{
+               "number" => 105,
+               "title" => "Closed issue",
+               "body" => nil,
+               "state" => "closed",
+               "state_reason" => "completed",
+               "labels" => [],
+               "assignees" => [],
+               "html_url" => "https://github.com/kmatsunami/symphony/issues/105",
+               "created_at" => "2026-01-01T00:00:00Z",
+               "updated_at" => "2026-01-01T00:01:00Z"
+             },
+             headers: []
+           }}
+      end
     end)
 
-    assert {:ok, [issue]} = Client.fetch_issue_states_by_ids(["104"])
-    assert issue.state == "Human Review"
+    assert {:ok, [open_issue, closed_issue]} = Client.fetch_issue_states_by_ids(["104", "105"])
+    assert open_issue.state == "Human Review"
+    assert closed_issue.id == "105"
+    assert closed_issue.state == "Done"
+
+    assert_received {:github_request, :get, "https://api.github.com/repos/kmatsunami/symphony/issues", _params}
+    assert_received {:github_request, :get, "https://api.github.com/repos/kmatsunami/symphony/issues/105", nil}
+
+    refute_received {:github_request, :get, "https://api.github.com/repos/kmatsunami/symphony/issues/104", nil}
   end
 
   test "github client updates state labels and closes terminal issues" do
@@ -242,12 +276,23 @@ defmodule SymphonyElixir.GithubTrackerTest do
           assert method == "PATCH"
           assert path == "/repos/kmatsunami/symphony/issues/101"
           assert opts[:body] == %{"labels" => ["status: Done"]}
-          {:ok, %{status: 200, body: %{"id" => 101, "state" => "closed"}, headers: []}}
+
+          {:ok,
+           %{
+             status: 200,
+             body: %{"id" => 101, "state" => "closed"},
+             headers: [{"link", "<https://api.github.com/resource?page=2>; rel=\"next\""}]
+           }}
         end
       )
 
     assert response["success"] == true
     assert [%{"text" => text}] = response["contentItems"]
-    assert Jason.decode!(text) == %{"id" => 101, "state" => "closed"}
+
+    assert Jason.decode!(text) == %{
+             "status" => 200,
+             "headers" => %{"link" => ["<https://api.github.com/resource?page=2>; rel=\"next\""]},
+             "body" => %{"id" => 101, "state" => "closed"}
+           }
   end
 end

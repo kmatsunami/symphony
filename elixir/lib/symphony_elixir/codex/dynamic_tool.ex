@@ -257,13 +257,12 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     }
   end
 
-  defp github_rest_response(%{status: status, body: body}) do
-    payload =
-      case body do
-        nil -> %{"status" => status}
-        "" -> %{"status" => status}
-        _ -> body
-      end
+  defp github_rest_response(%{status: status} = response) do
+    payload = %{
+      "status" => status,
+      "headers" => format_github_rest_headers(Map.get(response, :headers, [])),
+      "body" => Map.get(response, :body)
+    }
 
     %{
       "success" => true,
@@ -293,6 +292,20 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp encode_payload(payload), do: inspect(payload)
+
+  defp format_github_rest_headers(headers) when is_list(headers) do
+    headers
+    |> Enum.reduce(%{}, fn
+      {name, value}, acc when is_binary(name) and is_binary(value) ->
+        Map.update(acc, String.downcase(name), [value], &[value | &1])
+
+      _other, acc ->
+        acc
+    end)
+    |> Map.new(fn {name, values} -> {name, Enum.reverse(values)} end)
+  end
+
+  defp format_github_rest_headers(_headers), do: %{}
 
   defp tool_error_payload(:missing_query) do
     %{

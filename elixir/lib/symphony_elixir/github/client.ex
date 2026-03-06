@@ -45,8 +45,9 @@ defmodule SymphonyElixir.Github.Client do
   def fetch_issue_states_by_ids(issue_ids) when is_list(issue_ids) do
     with {:ok, repo} <- configured_repository(),
          {:ok, assignee_filter} <- routing_assignee_filter(),
-         {:ok, issues} <- fetch_issue_states(repo, issue_ids, assignee_filter) do
-      {:ok, Enum.reverse(issues)}
+         {:ok, normalized_issue_ids} <- normalize_issue_ids(issue_ids),
+         {:ok, issues_by_id} <- fetch_issue_states(repo, normalized_issue_ids, assignee_filter) do
+      {:ok, issue_states_in_requested_order(normalized_issue_ids, issues_by_id)}
     end
   end
 
@@ -366,32 +367,92 @@ defmodule SymphonyElixir.Github.Client do
     Map.put(body, "state_reason", state_reason)
   end
 
+  defp fetch_issue_states(_repo, [], _assignee_filter), do: {:ok, %{}}
+
   defp fetch_issue_states(repo, issue_ids, assignee_filter) do
-    issue_ids
-    |> Enum.uniq()
-    |> Enum.reduce_while({:ok, []}, fn issue_id, {:ok, acc} ->
-      fetch_issue_state(repo, issue_id, assignee_filter, acc)
+    wanted_ids = MapSet.new(issue_ids)
+
+    with {:ok, open_issues} <- list_repository_issues(repo, "open") do
+      {issues_by_id, missing_ids} = collect_open_issue_states(open_issues, wanted_ids, assignee_filter)
+      fetch_missing_issue_states(repo, missing_ids, assignee_filter, issues_by_id)
+    end
+  end
+
+  defp collect_open_issue_states(open_issues, wanted_ids, assignee_filter) do
+    Enum.reduce(open_issues, {%{}, wanted_ids}, fn issue, {issues_by_id, remaining_ids} ->
+      case normalize_issue_identifier_value(issue["number"]) do
+        issue_id when is_binary(issue_id) ->
+          if MapSet.member?(remaining_ids, issue_id) do
+            updated_issues_by_id =
+              case normalize_issue(issue, assignee_filter) do
+                %Issue{} = normalized_issue -> Map.put(issues_by_id, issue_id, normalized_issue)
+                _ -> issues_by_id
+              end
+
+            {updated_issues_by_id, MapSet.delete(remaining_ids, issue_id)}
+          else
+            {issues_by_id, remaining_ids}
+          end
+
+        _ ->
+          {issues_by_id, remaining_ids}
+      end
     end)
   end
 
-  defp fetch_issue_state(repo, issue_id, assignee_filter, acc) do
+  defp fetch_missing_issue_states(repo, missing_ids, assignee_filter, issues_by_id) do
+    missing_ids
+    |> MapSet.to_list()
+    |> Enum.reduce_while({:ok, issues_by_id}, fn issue_id, {:ok, acc} ->
+      fetch_missing_issue_state(repo, issue_id, assignee_filter, acc)
+    end)
+  end
+
+  defp fetch_missing_issue_state(repo, issue_id, assignee_filter, issues_by_id) do
     case fetch_issue(repo, issue_id) do
       {:ok, issue} ->
-        {:cont, {:ok, maybe_prepend_normalized_issue(acc, issue, assignee_filter)}}
+        {:cont, {:ok, maybe_put_normalized_issue(issues_by_id, issue_id, issue, assignee_filter)}}
 
       {:error, {:github_api_status, 404, _body}} ->
-        {:cont, {:ok, acc}}
+        {:cont, {:ok, issues_by_id}}
 
       {:error, reason} ->
         {:halt, {:error, reason}}
     end
   end
 
-  defp maybe_prepend_normalized_issue(acc, issue, assignee_filter) do
+  defp maybe_put_normalized_issue(issues_by_id, issue_id, issue, assignee_filter) do
     case normalize_issue(issue, assignee_filter) do
-      nil -> acc
-      normalized_issue -> [normalized_issue | acc]
+      nil -> issues_by_id
+      normalized_issue -> Map.put(issues_by_id, issue_id, normalized_issue)
     end
+  end
+
+  defp normalize_issue_ids(issue_ids) when is_list(issue_ids) do
+    issue_ids
+    |> Enum.uniq()
+    |> Enum.reduce_while({:ok, []}, fn issue_id, {:ok, acc} ->
+      case normalize_issue_number(issue_id) do
+        {:ok, normalized_issue_number} ->
+          {:cont, {:ok, [Integer.to_string(normalized_issue_number) | acc]}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, normalized_issue_ids} -> {:ok, Enum.reverse(normalized_issue_ids)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp issue_states_in_requested_order(issue_ids, issues_by_id) do
+    Enum.flat_map(issue_ids, fn issue_id ->
+      case Map.get(issues_by_id, issue_id) do
+        %Issue{} = issue -> [issue]
+        _ -> []
+      end
+    end)
   end
 
   defp normalize_issue_number(issue_id) when is_binary(issue_id) do
