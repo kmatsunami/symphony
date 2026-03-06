@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Orchestrator do
   @moduledoc """
-  Polls Linear and dispatches repository copies to Codex-backed workers.
+  Polls the configured tracker and dispatches repository copies to Codex-backed workers.
   """
 
   use GenServer
@@ -8,7 +8,7 @@ defmodule SymphonyElixir.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
-  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Tracker.Issue
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -182,8 +182,16 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.error("Linear API token missing in WORKFLOW.md")
         state
 
+      {:error, :missing_github_api_token} ->
+        Logger.error("GitHub API token missing in WORKFLOW.md")
+        state
+
       {:error, :missing_linear_project_slug} ->
         Logger.error("Linear project slug missing in WORKFLOW.md")
+        state
+
+      {:error, :missing_github_repository} ->
+        Logger.error("GitHub repository missing in WORKFLOW.md")
         state
 
       {:error, :missing_tracker_kind} ->
@@ -225,7 +233,7 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       {:error, reason} ->
-        Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
+        Logger.error("Failed to fetch from tracker: #{inspect(reason)}")
         state
 
       false ->
@@ -562,14 +570,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp terminal_state_set do
-    Config.linear_terminal_states()
+    Config.tracker_terminal_states()
     |> Enum.map(&normalize_issue_state/1)
     |> Enum.filter(&(&1 != ""))
     |> MapSet.new()
   end
 
   defp active_state_set do
-    Config.linear_active_states()
+    Config.tracker_active_states()
     |> Enum.map(&normalize_issue_state/1)
     |> Enum.filter(&(&1 != ""))
     |> MapSet.new()
@@ -774,7 +782,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp cleanup_issue_workspace(_identifier), do: :ok
 
   defp run_terminal_workspace_cleanup do
-    case Tracker.fetch_issues_by_states(Config.linear_terminal_states()) do
+    case Tracker.fetch_issues_by_states(Config.tracker_terminal_states()) do
       {:ok, issues} ->
         issues
         |> Enum.each(fn

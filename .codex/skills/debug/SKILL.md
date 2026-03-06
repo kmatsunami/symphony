@@ -11,7 +11,7 @@ description:
 ## Goals
 
 - Find why a run is stuck, retrying, or failing.
-- Correlate Linear issue identity to a Codex session quickly.
+- Correlate tracker issue identity to a Codex session quickly.
 - Read the right logs in the right order to isolate root cause.
 
 ## Log Sources
@@ -25,7 +25,7 @@ description:
 ## Correlation Keys
 
 - `issue_identifier`: human ticket key (example: `MT-625`)
-- `issue_id`: Linear UUID (stable internal ID)
+- `issue_id`: stable tracker-internal issue id
 - `session_id`: Codex thread-turn pair (`<thread_id>-<turn_id>`)
 
 `elixir/docs/logging.md` requires these fields for issue/session lifecycle logs. Use
@@ -47,8 +47,8 @@ them as your join keys during debugging.
 # 1) Narrow by ticket key (fastest entry point)
 rg -n "issue_identifier=MT-625" log/symphony.log*
 
-# 2) If needed, narrow by Linear UUID
-rg -n "issue_id=<linear-uuid>" log/symphony.log*
+# 2) If needed, narrow by tracker issue id
+rg -n "issue_id=<tracker-issue-id>" log/symphony.log*
 
 # 3) Pull session IDs seen for that ticket
 rg -o "session_id=[^ ;]+" log/symphony.log* | sort -u
