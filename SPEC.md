@@ -6,9 +6,9 @@ Purpose: Define a service that orchestrates coding agents to get project work do
 
 ## 1. Problem Statement
 
-Symphony is a long-running automation service that continuously reads work from an issue tracker
-(Linear in this specification version), creates an isolated workspace for each issue, and runs a
-coding agent session for that issue inside the workspace.
+Symphony is a long-running automation service that continuously reads work from an issue tracker,
+creates an isolated workspace for each issue, and runs a coding agent session for that issue
+inside the workspace.
 
 The service solves four operational problems:
 
@@ -119,7 +119,7 @@ Symphony is easiest to port when kept in these layers:
 4. `Execution Layer` (workspace + agent subprocess)
    - Filesystem lifecycle, workspace preparation, coding-agent protocol.
 
-5. `Integration Layer` (Linear adapter)
+5. `Integration Layer` (tracker adapter)
    - API calls and normalization for tracker data.
 
 6. `Observability Layer` (logs + optional status surface)
@@ -127,7 +127,7 @@ Symphony is easiest to port when kept in these layers:
 
 ### 3.3 External Dependencies
 
-- Issue tracker API (Linear for `tracker.kind: linear` in this specification version).
+- Issue tracker API for the configured tracker profile.
 - Local filesystem for workspaces and logs.
 - Optional workspace population tooling (for example Git CLI, if used).
 - Coding-agent executable that supports JSON-RPC-like app-server mode over stdio.
@@ -342,15 +342,20 @@ Fields:
 
 - `kind` (string)
   - Required for dispatch.
-  - Current supported value: `linear`
+  - Supported values are implementation-specific.
+  - Reference profiles in this fork are documented in `TRACKER_PROFILES.md`.
 - `endpoint` (string)
-  - Default for `tracker.kind == "linear"`: `https://api.linear.app/graphql`
+  - Default depends on `tracker.kind`.
 - `api_key` (string)
   - May be a literal token or `$VAR_NAME`.
-  - Canonical environment variable for `tracker.kind == "linear"`: `LINEAR_API_KEY`.
+  - Canonical environment variable depends on `tracker.kind`.
   - If `$VAR_NAME` resolves to an empty string, treat the key as missing.
 - `project_slug` (string)
   - Required for dispatch when `tracker.kind == "linear"`.
+- `repository` (string)
+  - Required for dispatch when `tracker.kind == "github"`.
+- `state_label_prefix` (string)
+  - Used by label-backed tracker profiles such as GitHub.
 - `active_states` (list of strings or comma-separated string)
   - Default: `Todo`, `In Progress`
 - `terminal_states` (list of strings or comma-separated string)
@@ -464,7 +469,7 @@ Template input variables:
 Fallback prompt behavior:
 
 - If the workflow prompt body is empty, the runtime may use a minimal default prompt
-  (`You are working on an issue from Linear.`).
+  (`You are working on an issue.`).
 - Workflow file read/parse failures are configuration/validation errors and should not silently fall
   back to a prompt.
 
@@ -551,10 +556,12 @@ Validation checks:
 
 This section is intentionally redundant so a coding agent can implement the config layer quickly.
 
-- `tracker.kind`: string, required, currently `linear`
-- `tracker.endpoint`: string, default `https://api.linear.app/graphql` when `tracker.kind=linear`
-- `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
+- `tracker.kind`: string, required, supported values depend on the implementation
+- `tracker.endpoint`: string, tracker-specific default
+- `tracker.api_key`: string or `$VAR`, canonical env depends on `tracker.kind`
 - `tracker.project_slug`: string, required when `tracker.kind=linear`
+- `tracker.repository`: string, required when `tracker.kind=github`
+- `tracker.state_label_prefix`: string, used by label-backed tracker profiles
 - `tracker.active_states`: list/string, default `Todo, In Progress`
 - `tracker.terminal_states`: list/string, default `Closed, Cancelled, Canceled, Duplicate, Done`
 - `polling.interval_ms`: integer, default `30000`
@@ -1052,7 +1059,7 @@ Unsupported dynamic tool calls:
 Optional client-side tool extension:
 
 - An implementation may expose a limited set of client-side tools to the app-server session.
-- Current optional standardized tool: `linear_graphql`.
+- Current optional standardized tools include `linear_graphql` and `github_rest`.
 - If implemented, supported tools should be advertised to the app-server session during startup
   using the protocol mechanism supported by the targeted Codex app-server version.
 - Unsupported tool names should still return a failure result and continue the session.
@@ -1088,6 +1095,39 @@ Optional client-side tool extension:
     for debugging
   - invalid input, missing auth, or transport failure -> `success=false` with an error payload
 - Return the GraphQL response or error payload as structured tool output that the model can inspect
+  in-session.
+
+`github_rest` extension contract:
+
+- Purpose: execute a raw REST request against GitHub using Symphony's configured tracker auth for
+  the current session.
+- Availability: only meaningful when `tracker.kind == "github"` and valid GitHub auth is
+  configured.
+- Preferred input shape:
+
+  ```json
+  {
+    "method": "GET",
+    "path": "/repos/owner/repo/issues/123",
+    "query": {
+      "optional": "query params object"
+    },
+    "body": {
+      "optional": "json body"
+    }
+  }
+  ```
+
+- `path` must be a non-empty absolute GitHub API path.
+- `method` defaults to `GET` and must be one of `GET`, `POST`, `PATCH`, `PUT`, or `DELETE`.
+- `query` and `body` are optional and, when present, must be JSON objects.
+- Reuse the configured GitHub endpoint and auth from the active Symphony workflow/runtime config;
+  do not require the coding agent to read raw tokens from disk.
+- Tool result semantics:
+  - 2xx HTTP response -> `success=true`
+  - non-2xx, invalid input, missing auth, or transport failure -> `success=false` with an error
+    payload
+- Return the REST response or error payload as structured tool output that the model can inspect
   in-session.
 
 Illustrative responses (equivalent payload shapes are acceptable if they preserve the same outcome):
@@ -1140,7 +1180,7 @@ Note:
 
 - Workspaces are intentionally preserved after successful runs.
 
-## 11. Issue Tracker Integration Contract (Linear-Compatible)
+## 11. Issue Tracker Integration Contract
 
 ### 11.1 Required Operations
 
@@ -1155,9 +1195,12 @@ An implementation must support these tracker adapter operations:
 3. `fetch_issue_states_by_ids(issue_ids)`
    - Used for active-run reconciliation.
 
-### 11.2 Query Semantics (Linear)
+### 11.2 Query Semantics
 
-Linear-specific requirements for `tracker.kind == "linear"`:
+Tracker profiles may use different transports so long as they normalize output to the domain model
+in Section 4.
+
+Linear profile requirements for `tracker.kind == "linear"`:
 
 - `tracker.kind == "linear"`
 - GraphQL endpoint (default `https://api.linear.app/graphql`)
@@ -1174,8 +1217,18 @@ Important:
 - Linear GraphQL schema details can drift. Keep query construction isolated and test the exact query
   fields/types required by this specification.
 
-A non-Linear implementation may change transport details, but the normalized outputs must match the
-domain model in Section 4.
+GitHub profile requirements for `tracker.kind == "github"`:
+
+- `tracker.kind == "github"`
+- REST endpoint (default `https://api.github.com`)
+- Auth token sent in `Authorization` header
+- `tracker.repository` maps to repository scope `owner/repo`
+- Candidate issue query lists repository issues and excludes pull requests
+- Workflow state is derived from labels matching `tracker.state_label_prefix`
+- Issue-state refresh query uses GitHub issue numbers
+- Open issues without a workflow label default to the first active state
+- Closed issues without a workflow label default to a terminal state
+- Network timeout: `30000 ms`
 
 ### 11.3 Normalization Rules
 
@@ -1195,11 +1248,15 @@ Recommended error categories:
 - `unsupported_tracker_kind`
 - `missing_tracker_api_key`
 - `missing_tracker_project_slug`
+- `missing_tracker_repository`
 - `linear_api_request` (transport failures)
 - `linear_api_status` (non-200 HTTP)
 - `linear_graphql_errors`
 - `linear_unknown_payload`
 - `linear_missing_end_cursor` (pagination integrity error)
+- `github_api_request` (transport failures)
+- `github_api_status` (non-2xx HTTP)
+- `github_unknown_payload`
 
 Orchestrator behavior on tracker errors:
 
@@ -1665,7 +1722,7 @@ Possible hardening measures include:
   of running with a maximally permissive configuration.
 - Adding external isolation layers such as OS/container/VM sandboxing, network restrictions, or
   separate credentials beyond the built-in Codex policy controls.
-- Filtering which Linear issues, projects, teams, labels, or other tracker sources are eligible for
+- Filtering which tracker issues, projects, repositories, labels, or other tracker sources are eligible for
   dispatch so untrusted or out-of-scope tasks do not automatically reach the agent.
 - Narrowing the optional `linear_graphql` tool so it can only read or mutate data inside the
   intended project scope, rather than exposing general workspace-wide tracker access.
@@ -1942,7 +1999,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Invalid YAML front matter returns typed error
 - Front matter non-map returns typed error
 - Config defaults apply when optional values are missing
-- `tracker.kind` validation enforces currently supported kind (`linear`)
+- `tracker.kind` validation enforces supported kinds for the implementation
 - `tracker.api_key` works (including `$VAR` indirection)
 - `$VAR` resolution works for tracker API key and path values
 - `~` path expansion works
@@ -1969,14 +2026,16 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.3 Issue Tracker Client
 
-- Candidate issue fetch uses active states and project slug
+- Candidate issue fetch uses active states and the configured tracker locator
 - Linear query uses the specified project filter field (`slugId`)
+- GitHub query uses the configured repository and excludes pull requests
 - Empty `fetch_issues_by_states([])` returns empty without API call
 - Pagination preserves order across multiple pages
 - Blockers are normalized from inverse relations of type `blocks`
 - Labels are normalized to lowercase
 - Issue state refresh by ID returns minimal normalized issues
 - Issue state refresh query uses GraphQL ID typing (`[ID!]`) as specified in Section 11.2
+- GitHub issue state refresh preserves label-defined open states such as `Human Review`
 - Error mapping for request errors, non-200, GraphQL errors, malformed payloads
 
 ### 17.4 Orchestrator Dispatch, Reconciliation, and Retry
@@ -2093,14 +2152,14 @@ Use the same validation profiles as Section 17:
 
 - Optional HTTP server honors CLI `--port` over `server.port`, uses a safe default bind host, and
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
-- Optional `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
-  app-server session using configured Symphony auth.
+- Optional tracker client-side tool extensions such as `linear_graphql` and `github_rest` expose
+  raw tracker access through the app-server session using configured Symphony auth.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
 - TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead
   of only via agent tools.
-- TODO: Add pluggable issue tracker adapters beyond Linear.
+- TODO: Add more tracker profiles and profile-specific capability negotiation.
 
 ### 18.3 Operational Validation Before Production (Recommended)
 

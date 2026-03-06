@@ -12,10 +12,10 @@ defmodule Mix.Tasks.Workspace.BeforeRemove do
 
       mix workspace.before_remove
       mix workspace.before_remove --branch feature/my-branch
-      mix workspace.before_remove --repo openai/symphony
+      mix workspace.before_remove --repo kmatsunami/symphony
   """
 
-  @default_repo "openai/symphony"
+  @default_repo "kmatsunami/symphony"
 
   @impl Mix.Task
   def run(args) do
@@ -33,7 +33,7 @@ defmodule Mix.Tasks.Workspace.BeforeRemove do
         Mix.raise("Invalid option(s): #{inspect(invalid)}")
 
       true ->
-        repo = opts[:repo] || @default_repo
+        repo = opts[:repo] || configured_repo() || @default_repo
         branch = opts[:branch] || current_branch()
 
         maybe_close_open_pull_requests(repo, branch)
@@ -106,7 +106,14 @@ defmodule Mix.Tasks.Workspace.BeforeRemove do
   end
 
   defp closing_comment(branch) do
-    "Closing because the Linear issue for branch #{branch} entered a terminal state without merge."
+    "Closing because the tracked issue for branch #{branch} entered a terminal state without merge."
+  end
+
+  defp configured_repo do
+    case SymphonyElixir.Config.github_repository() do
+      repository when is_binary(repository) and repository != "" -> repository
+      _ -> nil
+    end
   end
 
   defp format_output(""), do: ""

@@ -13,15 +13,16 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 
 ## How it works
 
-1. Polls Linear for candidate work
+1. Polls the configured tracker for candidate work
 2. Creates an isolated workspace per issue
 3. Launches Codex in [App Server mode](https://developers.openai.com/codex/app-server/) inside the
    workspace
 4. Sends a workflow prompt to Codex
 5. Keeps Codex working on the issue until the work is done
 
-During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
-skills can make raw Linear GraphQL calls.
+During app-server sessions, Symphony can also serve tracker-specific client-side tools. In this
+fork, GitHub-backed workflows expose `github_rest`, while Linear-backed workflows continue to
+expose `linear_graphql`.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
@@ -30,18 +31,20 @@ Symphony stops the active agent for that issue and cleans up matching workspaces
 
 1. Make sure your codebase is set up to work well with agents: see
    [Harness engineering](https://openai.com/index/harness-engineering/).
-2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
-   set it as the `LINEAR_API_KEY` environment variable.
+2. Create a GitHub token that can read and update issues in your target repository, and set it as
+   the `GITHUB_TOKEN` environment variable.
 3. Copy this directory's `WORKFLOW.md` to your repo.
-4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
-   - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
-     operations such as comment editing or upload flows.
+4. Optionally copy the `commit`, `push`, `pull`, `land`, and `github` skills to your repo.
+   - The `github` skill expects Symphony's `github_rest` app-server tool for raw GitHub issue and
+     comment operations such as workpad updates and state-label changes.
+   - Linear remains available as an alternate profile if you keep using `tracker.kind: linear` and
+     copy the `linear` skill as well.
 5. Customize the copied `WORKFLOW.md` file for your project.
-   - To get your project's slug, right-click the project and copy its URL. The slug is part of the
-     URL.
-   - When creating a workflow based on this repo, note that it depends on non-standard Linear
-     issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
-     Team Settings → Workflow in Linear.
+   - Set `tracker.repository` to your `owner/repo`.
+   - Create workflow labels such as `status: Todo`, `status: In Progress`, `status: Human Review`,
+     `status: Rework`, `status: Merging`, and terminal labels such as `status: Done`.
+   - When creating a workflow based on this repo, note that it depends on custom workflow states
+     carried by GitHub labels rather than a native project-state model.
 6. Follow the instructions below to install the required runtime dependencies and start the service.
 
 ## Prerequisites
@@ -56,7 +59,7 @@ mise exec -- elixir --version
 ## Run
 
 ```bash
-git clone https://github.com/openai/symphony
+git clone https://github.com/kmatsunami/symphony
 cd symphony/elixir
 mise trust
 mise install
@@ -88,8 +91,9 @@ Minimal example:
 ```md
 ---
 tracker:
-  kind: linear
-  project_slug: "..."
+  kind: github
+  repository: "owner/repo"
+  state_label_prefix: "status:"
 workspace:
   root: ~/code/workspaces
 hooks:
@@ -102,7 +106,7 @@ codex:
   command: codex app-server
 ---
 
-You are working on a Linear issue {{ issue.identifier }}.
+You are working on a GitHub issue {{ issue.identifier }}.
 
 Title: {{ issue.title }} Body: {{ issue.description }}
 ```
@@ -126,7 +130,12 @@ Notes:
   `git clone ... .` there, along with any other setup commands you need.
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
-- `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
+- `tracker.api_key` reads from `GITHUB_TOKEN` or `GH_TOKEN` for `tracker.kind: github`, and from
+  `LINEAR_API_KEY` for `tracker.kind: linear`.
+- `tracker.repository` is required for `tracker.kind: github`.
+- `tracker.project_slug` is required for `tracker.kind: linear`.
+- `tracker.state_label_prefix` defaults to `status:` and is used to map GitHub labels to workflow
+  states.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the
@@ -134,7 +143,8 @@ Notes:
 
 ```yaml
 tracker:
-  api_key: $LINEAR_API_KEY
+  api_key: $GITHUB_TOKEN
+  repository: owner/repo
 workspace:
   root: $SYMPHONY_WORKSPACE_ROOT
 hooks:
@@ -163,6 +173,7 @@ The observability UI now runs on a minimal Phoenix stack:
 - `test/`: ExUnit coverage for runtime behavior
 - `WORKFLOW.md`: in-repo workflow contract used by local runs
 - `../.codex/`: repository-local Codex skills and setup helpers
+- `../TRACKER_PROFILES.md`: concrete tracker contracts for Linear and GitHub
 
 ## Testing
 

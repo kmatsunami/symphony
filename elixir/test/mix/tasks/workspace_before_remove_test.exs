@@ -2,6 +2,7 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
   use ExUnit.Case, async: false
 
   alias Mix.Tasks.Workspace.BeforeRemove
+  alias SymphonyElixir.Workflow
 
   import ExUnit.CaptureIO
 
@@ -92,10 +93,10 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
         log = File.read!(log_path)
 
         assert log =~
-                 "pr list --repo openai/symphony --head feature/workpad --state open --json number --jq .[].number"
+                 "pr list --repo kmatsunami/symphony --head feature/workpad --state open --json number --jq .[].number"
 
-        assert log =~ "pr close 101 --repo openai/symphony"
-        assert log =~ "pr close 102 --repo openai/symphony"
+        assert log =~ "pr close 101 --repo kmatsunami/symphony"
+        assert log =~ "pr close 102 --repo kmatsunami/symphony"
       end
     )
   end
@@ -115,9 +116,9 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
       log = File.read!(log_path)
 
       assert log =~ "auth status"
-      assert log =~ "pr list --repo openai/symphony --head feature/workpad --state open --json number --jq .[].number"
-      assert log =~ "pr close 101 --repo openai/symphony"
-      assert log =~ "pr close 102 --repo openai/symphony"
+      assert log =~ "pr list --repo kmatsunami/symphony --head feature/workpad --state open --json number --jq .[].number"
+      assert log =~ "pr close 101 --repo kmatsunami/symphony"
+      assert log =~ "pr close 102 --repo kmatsunami/symphony"
 
       {second_output, error_output} =
         capture_task_output(fn ->
@@ -128,6 +129,112 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
       assert second_output =~ "Closed PR #101 for branch feature/workpad"
       assert error_output =~ "Failed to close PR #102 for branch feature/workpad"
     end)
+  end
+
+  test "uses explicit repo option when provided" do
+    with_fake_gh(fn log_path ->
+      output =
+        capture_io(fn ->
+          BeforeRemove.run(["--branch", "feature/explicit-repo", "--repo", "example/custom-repo"])
+        end)
+
+      assert output =~ "Closed PR #101 for branch feature/explicit-repo"
+
+      log = File.read!(log_path)
+
+      assert log =~
+               "pr list --repo example/custom-repo --head feature/explicit-repo --state open --json number --jq .[].number"
+
+      assert log =~ "pr close 101 --repo example/custom-repo"
+    end)
+  end
+
+  test "uses configured github repository when repo option is omitted" do
+    unique = System.unique_integer([:positive, :monotonic])
+    workflow_root = Path.join(System.tmp_dir!(), "workspace-before-remove-workflow-#{unique}")
+    workflow_path = Path.join(workflow_root, "WORKFLOW.md")
+    original_workflow_path = Workflow.workflow_file_path()
+
+    File.mkdir_p!(workflow_root)
+
+    try do
+      File.write!(workflow_path, """
+      ---
+      tracker:
+        kind: github
+        repository: configured/example-repo
+        api_key: token
+      ---
+      Prompt
+      """)
+
+      Workflow.set_workflow_file_path(workflow_path)
+
+      if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+
+      with_fake_gh(fn log_path ->
+        output =
+          capture_io(fn ->
+            Mix.Task.reenable("workspace.before_remove")
+            BeforeRemove.run(["--branch", "feature/configured-repo"])
+          end)
+
+        assert output =~ "Closed PR #101 for branch feature/configured-repo"
+
+        log = File.read!(log_path)
+
+        assert log =~
+                 "pr list --repo configured/example-repo --head feature/configured-repo --state open --json number --jq .[].number"
+      end)
+    after
+      Workflow.set_workflow_file_path(original_workflow_path)
+      if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+      File.rm_rf!(workflow_root)
+    end
+  end
+
+  test "falls back to the default repo when the workflow has no github repository" do
+    unique = System.unique_integer([:positive, :monotonic])
+    workflow_root = Path.join(System.tmp_dir!(), "workspace-before-remove-fallback-#{unique}")
+    workflow_path = Path.join(workflow_root, "WORKFLOW.md")
+    original_workflow_path = Workflow.workflow_file_path()
+
+    File.mkdir_p!(workflow_root)
+
+    try do
+      File.write!(workflow_path, """
+      ---
+      tracker:
+        kind: linear
+        project_slug: fallback-project
+        api_key: token
+      ---
+      Prompt
+      """)
+
+      Workflow.set_workflow_file_path(workflow_path)
+
+      if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+
+      with_fake_gh(fn log_path ->
+        output =
+          capture_io(fn ->
+            Mix.Task.reenable("workspace.before_remove")
+            BeforeRemove.run(["--branch", "feature/default-repo"])
+          end)
+
+        assert output =~ "Closed PR #101 for branch feature/default-repo"
+
+        log = File.read!(log_path)
+
+        assert log =~
+                 "pr list --repo kmatsunami/symphony --head feature/default-repo --state open --json number --jq .[].number"
+      end)
+    after
+      Workflow.set_workflow_file_path(original_workflow_path)
+      if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+      File.rm_rf!(workflow_root)
+    end
   end
 
   test "formats close failures without command stderr output" do
@@ -161,8 +268,8 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
         assert error_output =~ "Failed to close PR #102 for branch feature/no-output: exit 17"
         refute error_output =~ "output="
         log = File.read!(log_path)
-        assert log =~ "pr list --repo openai/symphony --head feature/no-output --state open --json number --jq .[].number"
-        assert log =~ "pr close 102 --repo openai/symphony"
+        assert log =~ "pr list --repo kmatsunami/symphony --head feature/no-output --state open --json number --jq .[].number"
+        assert log =~ "pr close 102 --repo kmatsunami/symphony"
       end
     )
   end
@@ -195,7 +302,7 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
         assert log =~ "auth status"
 
         assert log =~
-                 "pr list --repo openai/symphony --head feature/list-fails --state open --json number --jq .[].number"
+                 "pr list --repo kmatsunami/symphony --head feature/list-fails --state open --json number --jq .[].number"
 
         refute log =~ "pr close"
       end
